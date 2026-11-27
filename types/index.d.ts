@@ -1,5 +1,6 @@
 export type Scored = { text: string; score: number; grade: string; tips: string[] }
 export type Saved = { name: string; text: string }
+export type Gate = { isOn: boolean; threshold: number }
 
 declare module 'claude-code' {
   interface PluginState {

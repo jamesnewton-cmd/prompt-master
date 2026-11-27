@@ -1,11 +1,18 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Saved, Scored } from '../types'
+import type { Gate, Saved, Scored } from '../types'
 import { IMPROVE_SYSTEM, scorePrompt } from './score'
 
 const PANE = 'prompt-master'
 const STORE_KEY = 'library'
+const GATE_KEY = 'gate'
+const DEFAULT_GATE: Gate = { isOn: true, threshold: 45 }
+const IMPROVE = 'Improve it first'
+const SEND = 'Send as is'
+
+// The text of a rewrite the person has already seen, so sending it is never held again.
+let approved = ''
 
 const last = atom({ plugin: 'prompt-master', key: 'last' } as const, null, { shape: 'last-1' })
 const draft = atom({ plugin: 'prompt-master', key: 'draft' } as const, null, { shape: 'draft-1' })
@@ -20,6 +27,7 @@ const COMMANDS = [
   { name: 'pm-use', description: 'Put a saved prompt in the prompt box', argumentHint: '<name>' },
   { name: 'pm-list', description: 'List your saved prompts' },
   { name: 'pm-delete', description: 'Delete a saved prompt', argumentHint: '<name>' },
+  { name: 'pm-gate', description: 'Ask before sending a low-scoring prompt: on, off, or a score threshold', argumentHint: '[on|off|0-100]' },
 ] as const
 
 const isSaved = (v: unknown): v is Saved =>
@@ -30,6 +38,20 @@ const loadLibrary = async ($: EngineInterface): Promise<Saved[]> => {
   const raw = await $.store.get(STORE_KEY)
   return Array.isArray(raw) ? raw.filter(isSaved) : []
 }
+
+const isGate = (v: unknown): v is Gate =>
+  typeof v === 'object' && v !== null &&
+  typeof (v as Gate).isOn === 'boolean' && typeof (v as Gate).threshold === 'number'
+
+const loadGate = async ($: EngineInterface): Promise<Gate> => {
+  const raw = await $.store.get(GATE_KEY)
+  return isGate(raw) ? raw : DEFAULT_GATE
+}
+
+const describeGate = (g: Gate) =>
+  g.isOn
+    ? `Prompt Master asks before sending any prompt that scores below ${g.threshold}/100.`
+    : 'Prompt Master sends every prompt without asking (the check is off).'
 
 const saveLibrary = async ($: EngineInterface, list: Saved[]) => {
   await $.store.set(STORE_KEY, list)
@@ -82,6 +104,63 @@ const scoreDraft = async ($: EngineInterface, text: string) => {
   }
 }
 
+type Hold = { drop: string; text?: undefined } | { drop?: undefined; text: string }
+
+// Below the threshold, ask first. Returns null to send the prompt unchanged.
+const holdIfWeak = async ($: EngineInterface, scored: Scored): Promise<Hold | null> => {
+  if (scored.text === approved) {
+    approved = ''
+    return null
+  }
+  const gate = await loadGate($)
+  if (!gate.isOn || scored.score >= gate.threshold) {
+    return null
+  }
+
+  const tip = scored.tips[0] ? ` Top tip: ${scored.tips[0]}` : ''
+  let choice: string
+  try {
+    choice = await $.ui.ask(
+      `This prompt scores ${scored.score}/100 (${scored.grade}).${tip} Improve it before sending?`,
+      { options: [IMPROVE, SEND], header: 'Prompt' },
+    )
+  } catch {
+    return null // dismissed, or nobody to ask: send as typed
+  }
+  if (choice !== IMPROVE) {
+    return null
+  }
+
+  const better = await improve($, scored.text)
+  if (!better) {
+    $.ui.toast('Prompt Master could not reach the model, so your prompt was sent as typed.')
+    return null
+  }
+  approved = better.trim()
+  const after = scorePrompt(better)
+
+  const filled = await $.prompt.fill({ text: better, mode: 'replace' })
+  if (filled.isFilled) {
+    return {
+      drop: `Not sent yet. The improved prompt (${after.score}/100) is in your prompt box: edit it if you like, then press Enter to send it.`,
+    }
+  }
+
+  // No prompt box to fill (some apps): show the rewrite and let the person pick.
+  let pick: string
+  try {
+    pick = await $.ui.ask(`Improved prompt (${after.score}/100):\n\n${better}\n\nSend this version?`, {
+      options: ['Send improved', 'Send my original'],
+      header: 'Prompt',
+    })
+  } catch {
+    approved = ''
+    return { drop: `Not sent. Improved prompt you can copy:\n\n${better}` }
+  }
+  approved = ''
+  return pick === 'Send improved' ? { text: better } : null
+}
+
 const SLUG = /^[\w-]{1,40}$/
 
 export const register: Register = on => {
@@ -117,6 +196,11 @@ export const register: Register = on => {
       await update($, draft, () => null)
       await update($, isBandHidden, () => false)
       $.ui.status(`Prompt ${scored.score}/100 · ${scored.grade}`)
+
+      const held = await holdIfWeak($, scored)
+      if (held !== null) {
+        return held.drop !== undefined ? held : next({ ...e, text: held.text })
+      }
     }
 
     return next(e)
@@ -157,6 +241,25 @@ export const register: Register = on => {
       text: filled.isFilled ? `"${name}" is in your prompt box.` : found.text,
       isTextDisplayOnly: true,
     }
+  })
+
+  on('command.run', { command: 'pm-gate' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+    const gate = await loadGate($)
+    let chosen: Gate = gate
+    if (arg === 'on') {
+      chosen = { ...gate, isOn: true }
+    } else if (arg === 'off') {
+      chosen = { ...gate, isOn: false }
+    } else if (/^\d{1,3}$/.test(arg) && Number(arg) <= 100) {
+      chosen = { isOn: true, threshold: Number(arg) }
+    } else if (arg !== '') {
+      return { text: 'Usage: /pm-gate on | off | <score 0-100>', isTextDisplayOnly: true }
+    }
+    if (chosen !== gate) {
+      await $.store.set(GATE_KEY, chosen)
+    }
+    return { text: describeGate(chosen), isTextDisplayOnly: true }
   })
 
   on('command.run', { command: 'pm-list' }, async $ => {

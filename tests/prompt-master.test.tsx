@@ -63,3 +63,57 @@ test('the band scores the draft live as it is typed', async ($, on) => {
     await ui.unmount()
   }
 })
+
+const answer = (e: { questions: { question: string }[] }, label: string) => ({
+  result: { questions: e.questions, answers: { [e.questions[0]!.question]: label } },
+})
+
+const base = (on: (event: never, hook: never) => void) => {
+  const o = on as unknown as (event: string, hook: (...a: any[]) => unknown) => void
+  o('command.register', () => ({ value: { command: 'pm' } }))
+  o('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  o('store.get', () => ({ value: undefined }))
+  o('ui.status', () => ({ value: undefined }))
+  o('ui.toast', () => ({ value: undefined }))
+  return o
+}
+
+test('a weak prompt is held, improved and put in the prompt box', async ($, on) => {
+  const o = base(on as never)
+  const sent: string[] = []
+  const filled: string[] = []
+  o('prompt.submit', (_: unknown, e: { text: string }) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  o('tool.call', (_: unknown, e: { questions: { question: string }[] }) => answer(e, 'Improve it first'))
+  o('model.complete', () => ({ value: { isAnswered: true, text: 'Fix the login bug in `auth.ts`.' } }))
+  o('prompt.fill', (_: unknown, e: { text: string }) => {
+    filled.push(e.text)
+    return { isFilled: true }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const r = (await $.prompt.submit({ text: 'fix it', wait: false } as never)) as { drop?: string }
+  expect(r.drop ?? '').toContain('prompt box')
+  expect(sent.length).toBe(0)
+  expect(filled[0]).toBe('Fix the login bug in `auth.ts`.')
+
+  // Sending the rewrite goes straight through, with no second question.
+  await $.prompt.submit({ text: 'Fix the login bug in `auth.ts`.', wait: false } as never)
+  expect(sent[0]).toBe('Fix the login bug in `auth.ts`.')
+})
+
+test('"Send as is" sends the original untouched', async ($, on) => {
+  const o = base(on as never)
+  const sent: string[] = []
+  o('prompt.submit', (_: unknown, e: { text: string }) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  o('tool.call', (_: unknown, e: { questions: { question: string }[] }) => answer(e, 'Send as is'))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: 'fix it', wait: false } as never)
+  expect(sent[0]).toBe('fix it')
+})
