@@ -8,6 +8,7 @@ const PANE = 'prompt-master'
 const STORE_KEY = 'library'
 
 const last = atom({ plugin: 'prompt-master', key: 'last' } as const, null, { shape: 'last-1' })
+const draft = atom({ plugin: 'prompt-master', key: 'draft' } as const, null, { shape: 'draft-1' })
 const library = atom({ plugin: 'prompt-master', key: 'library' } as const, [], { shape: 'library-1' })
 const isBandHidden = atom({ plugin: 'prompt-master', key: 'isBandHidden' } as const, false)
 const isImproving = atom({ plugin: 'prompt-master', key: 'isImproving' } as const, false)
@@ -69,6 +70,18 @@ const improveIntoBox = async ($: EngineInterface, rough: string): Promise<string
     : `Improved prompt (${after.score}/100):\n\n${better}`
 }
 
+const scoreDraft = async ($: EngineInterface, text: string) => {
+  const clean = text.trim()
+  const next: Scored | null = clean && !clean.startsWith('/') ? scorePrompt(clean) : null
+  const prev = await read($, draft)
+  const isSame =
+    prev === next ||
+    (prev !== null && next !== null && prev.score === next.score && prev.tips[0] === next.tips[0])
+  if (!isSame) {
+    await update($, draft, () => next)
+  }
+}
+
 const SLUG = /^[\w-]{1,40}$/
 
 export const register: Register = on => {
@@ -82,12 +95,26 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Live scoring: score the draft as it is typed, recalled or filled.
+  on('prompt.edit', async ($, e, next) => {
+    const box = await next(e)
+    await scoreDraft($, box.text)
+    return box
+  })
+
+  on('prompt.change', async ($, e, next) => {
+    const done = await next(e)
+    await scoreDraft($, e.text)
+    return done
+  })
+
   // Score every prompt the person sends; never changes what is sent.
   on('prompt.submit', async ($, e, next) => {
     const text = e.text.trim()
     if (!e.command && !e.isMeta && e.origin?.kind !== 'plugin' && text && !text.startsWith('/')) {
       const scored: Scored = scorePrompt(text)
       await update($, last, () => scored)
+      await update($, draft, () => null)
       await update($, isBandHidden, () => false)
       $.ui.status(`Prompt ${scored.score}/100 · ${scored.grade}`)
     }
@@ -153,17 +180,19 @@ export const register: Register = on => {
 
   // A quiet band above the prompt: the last prompt's score and its top tip.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const scored = await read($, last)
+    const live = await read($, draft)
+    const scored = live ?? (await read($, last))
     if (e.props.hasSurvey || scored === null || (await read($, isBandHidden))) {
       return next(e)
     }
     const { Box, Button, Text } = $.ui.resolve(e)
     const tip = scored.tips[0]
+    const label = live ? 'Draft' : 'Last'
 
     return (
       <Box>
         <Text color={scored.score >= 65 ? 'green' : scored.score >= 45 ? 'yellow' : 'red'}>
-          ✦ {scored.score}/100 {scored.grade}
+          ✦ {label} {scored.score}/100 {scored.grade}
         </Text>
         <Text dimColor> {tip ? `· ${tip} ` : '· Nicely specified. '}</Text>
         <Button key="pane" label="Details" onPress={() => $.ui.open({ id: PANE, title: 'Prompt Master' })} />
@@ -174,16 +203,17 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
-    const scored = await read($, last)
+    const live = await read($, draft)
+    const scored = live ?? (await read($, last))
     const list = await read($, library)
     const busy = await read($, isImproving)
 
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
-          <Text bold>Last prompt</Text>
+          <Text bold>{live ? 'Your draft (live)' : 'Last prompt'}</Text>
           {scored === null ? (
-            <Text dimColor>Send a prompt and it is scored here.</Text>
+            <Text dimColor>Start typing a prompt and it is scored here as you go.</Text>
           ) : (
             <Box flexDirection="column">
               <Text color={scored.score >= 65 ? 'green' : scored.score >= 45 ? 'yellow' : 'red'}>
@@ -214,10 +244,11 @@ export const register: Register = on => {
             {scored !== null && (
               <Button
                 key="improve-last"
-                label="Improve last prompt"
+                label={live ? 'Improve this draft' : 'Improve last prompt'}
                 onPress={async () => {
                   if (busy) return
-                  $.ui.toast(await improveIntoBox($, scored.text))
+                  const text = live ? (await $.prompt.read()).text : scored.text
+                  $.ui.toast(await improveIntoBox($, text))
                 }}
               />
             )}
