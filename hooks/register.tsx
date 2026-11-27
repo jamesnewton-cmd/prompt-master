@@ -7,7 +7,7 @@ import { IMPROVE_SYSTEM, scorePrompt } from './score'
 const PANE = 'prompt-master'
 const STORE_KEY = 'library'
 const GATE_KEY = 'gate'
-const DEFAULT_GATE: Gate = { isOn: true, threshold: 45 }
+const DEFAULT_GATE: Gate = { isOn: true, threshold: 65 }
 const IMPROVE = 'Improve it first'
 const SEND = 'Send as is'
 

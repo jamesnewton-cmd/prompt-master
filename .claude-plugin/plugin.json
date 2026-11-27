@@ -1,6 +1,6 @@
 {
   "name": "prompt-master",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Scores every prompt you send, offers to improve weak ones before they go, rewrites rough prompts, and keeps a library of your best ones.",
   "license": "MIT",
   "types": "./types/index.d.ts"
